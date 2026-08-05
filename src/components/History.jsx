@@ -275,8 +275,11 @@ export default function History({ onLog }) {
           </section>
 
           <section className="panel">
-            <h2>Comparison</h2>
-            <div className="compare-grid">
+            <h2>Results</h2>
+            <div className="compare-grid single">
+              {/* Device column hidden — showing computed values only. The stored
+                  session still carries selSession.device untouched, so restoring
+                  this block brings the comparison back with no other change.
               <div className="compare-col">
                 <div className="col-head dev">Device calculation</div>
                 <div className="col-sub">As stored from the firmware at scan time.</div>
@@ -291,6 +294,7 @@ export default function History({ onLog }) {
                   vata={selSession.device?.vata} pitta={selSession.device?.pitta}
                   kapha={selSession.device?.kapha} />
               </div>
+              */}
 
               <div className="compare-col">
                 <div className="col-head ours">Our calculation</div>

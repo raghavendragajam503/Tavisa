@@ -579,8 +579,12 @@ export default function App() {
           {step === 5 && (
             <>
               <section className="panel">
-                <h2>Comparison</h2>
-                <div className="compare-grid">
+                <h2>Results</h2>
+                <div className="compare-grid single">
+                  {/* Device column hidden — showing computed values only.
+                      deviceVals is still received, logged and stored with the
+                      session, so restoring this block brings the comparison back
+                      with no other change.
                   <div className="compare-col">
                     <div className="col-head dev">Device calculation</div>
                     <div className="col-sub">
@@ -599,6 +603,7 @@ export default function App() {
                     <div className="sec">Dosha</div>
                     <DoshaBars vata={deviceVals.vata} pitta={deviceVals.pitta} kapha={deviceVals.kapha} />
                   </div>
+                  */}
 
                   <div className="compare-col">
                     <div className="col-head ours">
@@ -643,6 +648,8 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Device-vs-ours agreement box hidden along with the device column —
+                    every line in it is a comparison against a value no longer shown.
                 {delta.length > 0 && (
                   <div className="delta-box">
                     {delta.map((d, i) => <div key={i} dangerouslySetInnerHTML={{ __html: d }} />)}
@@ -653,6 +660,7 @@ export default function App() {
                     </div>
                   </div>
                 )}
+                */}
 
                 {analysis && (
                   <div className="algo-compare">
