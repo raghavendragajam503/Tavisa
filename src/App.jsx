@@ -37,7 +37,10 @@ const fx = (v, d = 1, unit = '') => (Number.isFinite(v) ? v.toFixed(d) + unit : 
 
 export default function App() {
   const [view, setView] = useState('scan');          // scan | history
-  const [algo, setAlgo] = useState('sdptg');         // which algorithm drives the result
+  // Pinned to legacy-profile for now. The picker below is commented out, so this
+  // is the single algorithm the headline panel reports; the table lower down
+  // still runs all three on the same recording.
+  const [algo, setAlgo] = useState('legacy-profile');
   const [step, setStep] = useState(1);
   const [log, setLog] = useState([]);
   const [status, setStatus] = useState('idle');      // idle | connected | error
@@ -373,6 +376,8 @@ export default function App() {
     return analysis.legacy?.[algo] || null;
   }, [analysis, algo]);
 
+  // Retained for the commented-out device comparison below; nothing renders it
+  // while that block is hidden.
   const delta = useMemo(() => buildDelta(deviceVals, analysis?.hrv, selected), [deviceVals, analysis, selected]);
 
   // =====================================================================
@@ -607,11 +612,13 @@ export default function App() {
 
                   <div className="compare-col">
                     <div className="col-head ours">
-                      Our calculation
+                      {ALGORITHMS[algo].label}
+                      {/* Algorithm picker hidden while the headline is pinned to one method.
                       <select className="algo-select" value={algo} onChange={(e) => setAlgo(e.target.value)}>
                         {Object.entries(ALGORITHMS).map(([k, a]) =>
                           <option key={k} value={k}>{a.label}</option>)}
                       </select>
+                      */}
                     </div>
                     <div className="col-sub">
                       <strong>Computed in this page.</strong><br />
@@ -763,10 +770,6 @@ export default function App() {
                     >
                       {showDetail ? 'Hide detailed waveform' : 'Show detailed waveform'}
                     </button>
-                    <span className="hint" style={{ margin: 0 }}>
-                      Plots one window at a time against a time axis, at a scale where individual pulses are
-                      actually visible.
-                    </span>
                   </div>
 
                   {showDetail && (

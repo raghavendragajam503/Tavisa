@@ -7,6 +7,11 @@ import { DoshaBars, WaveformCanvas, WaveformDetail, SdptgCanvas, KvGrid } from '
 const fx = (v, d = 1, u = '') => (Number.isFinite(v) ? v.toFixed(d) + u : '—');
 const when = (d) => (d ? new Date(d).toLocaleString() : '—');
 
+// Which method the headline panel reports, matching the results screen. The
+// table lower down still runs all three on the same stored waveform.
+const HEADLINE_KEY = 'legacy-profile';
+const HEADLINE_LABEL = 'Legacy — no vitals';
+
 export default function History({ onLog }) {
   const [patients, setPatients] = useState([]);
   const [search, setSearch] = useState('');
@@ -102,6 +107,10 @@ export default function History({ onLog }) {
     } catch (e) { onLog?.(e.message, 'error'); }
   };
 
+  // The headline dosha figures. Falls back to null so the "not measurable" note
+  // shows rather than three dashes with no explanation.
+  const headline = selSession?.legacy?.[HEADLINE_KEY] ?? null;
+
   return (
     <div className="history">
       {error && <div className="alert err">{error}</div>}
@@ -182,7 +191,15 @@ export default function History({ onLog }) {
                   <tbody>
                     {sessions.map((s) => {
                       const c = s.computed || {};
-                      const ok = Number.isFinite(c.vata);
+                      // computed.* holds whichever method was SELECTED when the
+                      // scan was taken, so older rows carry SDPTG figures. Every
+                      // session also stores all three under allAlgorithms, so the
+                      // headline method can be shown consistently across rows
+                      // without re-fetching waveforms the list endpoint omits.
+                      const head = s.allAlgorithms?.[HEADLINE_KEY];
+                      const d = head || c;
+                      const ok = Number.isFinite(d.vata);
+                      const fellBack = !head && Number.isFinite(c.vata);
                       return (
                         <tr key={s._id} className={selSession?._id === s._id ? 'sel' : ''}>
                           <td className="dim">{when(s.recordedAt)}</td>
@@ -193,10 +210,14 @@ export default function History({ onLog }) {
                           <td>{fx(c.sdnnMs)}</td>
                           <td>{fx(c.lfhf, 2)}</td>
                           <td className="mono">
-                            {ok ? `${c.vata} / ${c.pitta} / ${c.kapha}` : <span className="dim">not measurable</span>}
+                            {ok ? `${d.vata} / ${d.pitta} / ${d.kapha}` : <span className="dim">not measurable</span>}
                           </td>
-                          <td>{c.confidence ?? '—'}</td>
-                          <td className="mono dim">{s.algorithm || 'sdptg'}</td>
+                          <td>{d.confidence ?? '—'}</td>
+                          <td className="mono dim" title={fellBack
+                            ? `This session predates the change and stored no ${HEADLINE_KEY} result, so its selected-at-scan-time figures (${s.algorithm || 'sdptg'}) are shown instead.`
+                            : HEADLINE_LABEL}>
+                            {head ? HEADLINE_LABEL : (s.algorithm || 'sdptg') + ' *'}
+                          </td>
                           <td className="row-btns tight">
                             <button onClick={() => openSession(s)}>View</button>
                             <a className="btn" href={api.waveformCsvUrl(s._id)}>CSV</a>
@@ -259,9 +280,6 @@ export default function History({ onLog }) {
               <button className={showDetail ? 'primary' : ''} onClick={() => setShowDetail((v) => !v)}>
                 {showDetail ? 'Hide detailed waveform' : 'Show detailed waveform'}
               </button>
-              <span className="hint" style={{ margin: 0 }}>
-                One window at a time against a time axis, at a scale where individual pulses are visible.
-              </span>
             </div>
 
             {showDetail && (
@@ -297,10 +315,11 @@ export default function History({ onLog }) {
               */}
 
               <div className="compare-col">
-                <div className="col-head ours">Our calculation</div>
+                <div className="col-head ours">{HEADLINE_LABEL}</div>
                 <div className="col-sub">
                   Re-computed just now from the stored raw waveform, so algorithm improvements apply
-                  retroactively to old recordings.
+                  retroactively to old recordings. HR, RMSSD, SDNN and LF/HF come from the beat series and are
+                  the same whichever dosha method is selected.
                 </div>
                 <Row k="Heart rate" v={fx(selSession.reanalysed?.hrv?.hr, 1, ' bpm')} />
                 <Row k="SpO₂" v={fx(selSession.device?.spo2, 1, ' % (device)')} />
@@ -308,20 +327,22 @@ export default function History({ onLog }) {
                 <Row k="SDNN" v={fx(selSession.reanalysed?.hrv?.sdnn)} />
                 <Row k="LF/HF" v={fx(selSession.reanalysed?.hrv?.lfhf, 2)} />
                 <div className="sec">
-                  Dosha
-                  {selSession.reanalysed?.vascular &&
-                    <span className="conf">conf. {selSession.reanalysed.vascular.confidence}</span>}
+                  Dosha <span className="dim">— {HEADLINE_LABEL}</span>
+                  {headline && <span className="conf">conf. {headline.confidence}</span>}
                 </div>
-                <DoshaBars
-                  vata={selSession.reanalysed?.vascular?.vata}
-                  pitta={selSession.reanalysed?.vascular?.pitta}
-                  kapha={selSession.reanalysed?.vascular?.kapha} />
-                {!selSession.reanalysed?.vascular && (
+                <DoshaBars vata={headline?.vata} pitta={headline?.pitta} kapha={headline?.kapha} />
+                {!headline && (
                   <div className="col-note err">
                     Not measurable: {selSession.reanalysed?.unavailableReason
                       || selSession.computed?.unavailableReason || 'insufficient data'}.
                   </div>
                 )}
+                {/* Headline pinned to legacy-profile to match the results screen. SDPTG:
+                <DoshaBars
+                  vata={selSession.reanalysed?.vascular?.vata}
+                  pitta={selSession.reanalysed?.vascular?.pitta}
+                  kapha={selSession.reanalysed?.vascular?.kapha} />
+                */}
               </div>
             </div>
 
