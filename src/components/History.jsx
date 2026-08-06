@@ -2,15 +2,18 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { analyseRecording, DEVICE_SAMPLE_RATE_HZ } from '../lib/dsp';
 import { legacyDoshaFull, legacyDoshaProfile } from '../lib/dsp-legacy';
-import { DoshaBars, WaveformCanvas, WaveformDetail, SdptgCanvas, KvGrid } from './Common';
+import { DoshaBars, WaveformCanvas, WaveformDetail, KvGrid } from './Common';
 
 const fx = (v, d = 1, u = '') => (Number.isFinite(v) ? v.toFixed(d) + u : '—');
 const when = (d) => (d ? new Date(d).toLocaleString() : '—');
 
 // Which method the headline panel reports, matching the results screen. The
-// table lower down still runs all three on the same stored waveform.
-const HEADLINE_KEY = 'legacy-profile';
-const HEADLINE_LABEL = 'Legacy — no vitals';
+// table lower down still runs both on the same stored waveform. The key is the
+// stored database value and must match ALGORITHMS in App.jsx; the label is
+// display only.
+const HEADLINE_KEY = 'legacy-full';
+const HEADLINE_LABEL = 'Using heart rate & SpO₂';
+const ALT_LABEL = 'Profile only, no heart rate or SpO₂';
 
 export default function History({ onLog }) {
   const [patients, setPatients] = useState([]);
@@ -39,6 +42,10 @@ export default function History({ onLog }) {
       const r = await api.listSessions({ patient: p._id, limit: 100 });
       setSessions(r.items);
       onLog?.(`Loaded ${r.items.length} stored session(s) for ${p.patientId}.`);
+      // Open the most recent recording straight away — the list is newest-first,
+      // so opening a patient lands on their latest results rather than on a table
+      // that needs a second click to say anything.
+      if (r.items.length) await openSession(r.items[0]);
     } catch (e) {
       setError(e.message); onLog?.(e.message, 'error');
     } finally { setBusy(false); }
@@ -172,8 +179,10 @@ export default function History({ onLog }) {
             'weight (kg)': selPatient.weightKg,
             'height (cm)': selPatient.heightCm,
             'BMI': selPatient.bmi ?? '—',
-            'special state': selPatient.specialState || 'none',
-            'stage': selPatient.stateDetail || '—',
+            // "special state" and its "stage" detail are not shown. They are a
+            // pair — stage only means anything alongside a special state — so
+            // dropping one would leave a dangling detail field. Both are still
+            // stored on the patient and still sent to the device in the profile.
           }} />
 
           {sessions.length === 0
@@ -201,7 +210,12 @@ export default function History({ onLog }) {
                       const ok = Number.isFinite(d.vata);
                       const fellBack = !head && Number.isFinite(c.vata);
                       return (
-                        <tr key={s._id} className={selSession?._id === s._id ? 'sel' : ''}>
+                        <tr
+                          key={s._id}
+                          className={'clickable' + (selSession?._id === s._id ? ' sel' : '')}
+                          onClick={() => openSession(s)}
+                          title="Show this recording in full"
+                        >
                           <td className="dim">{when(s.recordedAt)}</td>
                           <td className={s.sampleRateHz < 20 ? 'bad' : ''}>{s.sampleRateHz}</td>
                           <td>{s.waveformSampleCount}</td>
@@ -218,8 +232,10 @@ export default function History({ onLog }) {
                             : HEADLINE_LABEL}>
                             {head ? HEADLINE_LABEL : (s.algorithm || 'sdptg') + ' *'}
                           </td>
-                          <td className="row-btns tight">
-                            <button onClick={() => openSession(s)}>View</button>
+                          {/* The row itself opens the recording, so these stop the
+                              click bubbling — otherwise deleting or downloading
+                              would also re-open the row underneath. */}
+                          <td className="row-btns tight" onClick={(e) => e.stopPropagation()}>
                             <a className="btn" href={api.waveformCsvUrl(s._id)}>CSV</a>
                             <button className="danger" onClick={() => removeSession(s._id)}>×</button>
                           </td>
@@ -337,18 +353,12 @@ export default function History({ onLog }) {
                       || selSession.computed?.unavailableReason || 'insufficient data'}.
                   </div>
                 )}
-                {/* Headline pinned to legacy-profile to match the results screen. SDPTG:
-                <DoshaBars
-                  vata={selSession.reanalysed?.vascular?.vata}
-                  pitta={selSession.reanalysed?.vascular?.pitta}
-                  kapha={selSession.reanalysed?.vascular?.kapha} />
-                */}
               </div>
             </div>
 
             {selSession.legacy && selSession.reanalysed && (
               <div className="algo-compare">
-                <div className="sec">All three algorithms, re-run on this stored recording</div>
+                <div className="sec">Both methods, re-run on this stored recording</div>
                 <div className="table-wrap">
                   <table>
                     <thead>
@@ -356,14 +366,23 @@ export default function History({ onLog }) {
                           <th>Stored at scan time</th></tr>
                     </thead>
                     <tbody>
-                      {[['sdptg', 'SDPTG (new)', selSession.reanalysed.vascular],
-                        ['legacy-full', 'Legacy — with vitals', selSession.legacy['legacy-full']],
-                        ['legacy-profile', 'Legacy — no vitals', selSession.legacy['legacy-profile']]
+                      {[['legacy-full', HEADLINE_LABEL, selSession.legacy['legacy-full']],
+                        ['legacy-profile', ALT_LABEL, selSession.legacy['legacy-profile']]
                       ].map(([key, label, r]) => {
                         const stored = selSession.allAlgorithms?.[key];
                         return (
-                          <tr key={key} className={selSession.algorithm === key ? 'sel' : ''}>
-                            <td>{label}{selSession.algorithm === key && <span className="dim"> (selected)</span>}</td>
+                          // Two different things were being conflated by one
+                          // "(selected)" marker: the method shown in the panel
+                          // above (always HEADLINE_KEY) and the one that happened
+                          // to be selected when this session was recorded, which
+                          // for older sessions is a method the app no longer uses.
+                          <tr key={key} className={key === HEADLINE_KEY ? 'sel' : ''}>
+                            <td>
+                              {label}
+                              {key === HEADLINE_KEY && <span className="dim"> (shown above)</span>}
+                              {selSession.algorithm === key && key !== HEADLINE_KEY &&
+                                <span className="dim"> (used when this scan was taken)</span>}
+                            </td>
                             {r
                               ? <>
                                   <td className="mono">{r.vata}</td>
@@ -391,41 +410,33 @@ export default function History({ onLog }) {
               </div>
             )}
 
-            {/* stored-vs-now, which reveals whether the algorithm has changed */}
-            {Number.isFinite(selSession.computed?.vata) && selSession.reanalysed?.vascular && (
+            {/* stored-vs-now, which reveals whether the analysis code has changed */}
+            {Number.isFinite(selSession.computed?.vata) && headline && (
               <div className="delta-box">
                 <div>
                   <b>Stored at scan time</b> {selSession.computed.vata} / {selSession.computed.pitta} / {selSession.computed.kapha}
-                  &nbsp;·&nbsp; <b>re-computed now</b> {selSession.reanalysed.vascular.vata} / {selSession.reanalysed.vascular.pitta} / {selSession.reanalysed.vascular.kapha}
+                  &nbsp;·&nbsp; <b>re-computed now</b> {headline.vata} / {headline.pitta} / {headline.kapha}
                 </div>
                 <div className="dim">
-                  A difference here means the analysis code changed since this recording was stored. The raw
-                  waveform is the source of truth, which is why it is kept.
+                  A difference here means the analysis code changed since this recording was stored — including
+                  the removal of SDPTG, which is what older sessions were scanned with. The raw waveform is the
+                  source of truth, which is why it is kept.
                 </div>
               </div>
             )}
           </section>
 
-          {selSession.reanalysed?.vascular && (
+          {selSession.reanalysed && (
             <section className="panel">
-              <h2>Measured pulse-wave indices</h2>
+              <h2>Measured signal quality</h2>
               <KvGrid rows={{
                 'sample rate (Hz)': selSession.reanalysed.sampleRateHz,
+                'samples': selSession.reanalysed.sampleCount,
                 'beats detected': selSession.reanalysed.beats.length,
-                'cycles averaged': selSession.reanalysed.vascular.quality.cycles_used,
-                'alignment quality': selSession.reanalysed.vascular.quality.alignment_quality,
-                'cycle length (ms)': selSession.reanalysed.vascular.morphology.cycle_ms,
-                'crest time (ms)': selSession.reanalysed.vascular.morphology.crest_time_ms,
-                'b/a': selSession.reanalysed.vascular.sdptg.b_a,
-                'c/a': selSession.reanalysed.vascular.sdptg.c_a,
-                'd/a': selSession.reanalysed.vascular.sdptg.d_a,
-                'e/a': selSession.reanalysed.vascular.sdptg.e_a,
-                'aging index': selSession.reanalysed.vascular.sdptg.aging_index,
+                'RR intervals used': selSession.reanalysed.hrv?.rrCount ?? '—',
+                'RR rejected as artifact': selSession.reanalysed.hrv?.rrRejected ?? '—',
+                'gap markers removed': selSession.gapCount ?? 0,
               }} />
-              <div className="sec">SDPTG — second derivative</div>
-              <SdptgCanvas
-                curve={selSession.reanalysed.vascular.sdptgCurve}
-                sdptg={selSession.reanalysed.vascular.sdptg} />
             </section>
           )}
         </>

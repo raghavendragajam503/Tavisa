@@ -1,8 +1,10 @@
 // ===========================================================================
 // LEGACY DOSHA ALGORITHMS  —  ports of page1-oldalg-full and page2-oldalg-profile
 // ---------------------------------------------------------------------------
-// Kept so results can be compared against the newer SDPTG method on the same
-// recording. Reproduced FAITHFULLY, including their known weaknesses:
+// These are now the ONLY dosha methods in the app — SDPTG has been removed, so
+// there is no longer a waveform-only result to compare against. Reproduced
+// FAITHFULLY, including their known weaknesses, which therefore now apply to
+// every dosha figure the app reports:
 //
 //   * The anchor tables below are hand-authored, not derived from data. There
 //     is no evidence a 10-year-old is 65% Kapha rather than 55% or 75%. The
@@ -18,8 +20,8 @@
 //     PROFILE variant: 70%, because HR and SpO2 are removed and their weight
 //     is redistributed to age/gender/weight/height.
 //
-// Use LEGACY_* for comparison; prefer the SDPTG method in dsp.js for anything
-// you intend to rely on.
+// Both weaknesses are unmitigated. Treat the dosha output accordingly; the HRV
+// figures in dsp.js are measured from the pulse and are unaffected.
 // ===========================================================================
 
 import { mean } from './dsp.js';

@@ -533,60 +533,6 @@ export function WaveformDetail({ data, sampleRateHz = 50, beats, height = 300 })
   );
 }
 
-// ---------------------------------------------------------------------------
-// SDPTG curve with the a-b-c-d-e waves marked, so the extraction can be
-// checked by eye rather than trusted.
-// ---------------------------------------------------------------------------
-export function SdptgCanvas({ curve, sdptg, height = 180 }) {
-  const ref = useRef(null);
-
-  useEffect(() => {
-    const cv = ref.current;
-    if (!cv || !curve?.length) return;
-    const rect = cv.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    cv.width = Math.max(300, rect.width) * dpr;
-    cv.height = height * dpr;
-    const ctx = cv.getContext('2d');
-    const w = cv.width, h = cv.height, pad = 14 * dpr;
-    ctx.clearRect(0, 0, w, h);
-
-    let mx = 0;
-    for (const v of curve) mx = Math.max(mx, Math.abs(v));
-    if (!(mx > 0)) mx = 1;
-    const x = (i) => pad + (i / (curve.length - 1)) * (w - 2 * pad);
-    const y = (v) => h / 2 - (v / mx) * (h / 2 - pad);
-
-    const css = getComputedStyle(document.documentElement);
-    ctx.strokeStyle = css.getPropertyValue('--line').trim();
-    ctx.lineWidth = 1 * dpr;
-    ctx.beginPath(); ctx.moveTo(pad, h / 2); ctx.lineTo(w - pad, h / 2); ctx.stroke();
-
-    ctx.beginPath();
-    ctx.strokeStyle = '#9ca8ff';
-    ctx.lineWidth = 1.8 * dpr;
-    for (let i = 0; i < curve.length; i++) i ? ctx.lineTo(x(i), y(curve[i])) : ctx.moveTo(x(i), y(curve[i]));
-    ctx.stroke();
-
-    if (!sdptg) return;
-    const marks = [
-      ['a', sdptg.a_index, false], ['b', sdptg.b_index, true],
-      ['c', sdptg.c_index, false], ['d', sdptg.d_index, true],
-      ['e', sdptg.e_index, false],
-    ];
-    ctx.font = `${11 * dpr}px ui-monospace, monospace`;
-    for (const [label, idx, neg] of marks) {
-      if (idx == null || idx < 0 || idx >= curve.length) continue;
-      ctx.fillStyle = neg ? '#f0665a' : '#6ee7b7';
-      ctx.beginPath();
-      ctx.arc(x(idx), y(curve[idx]), 4 * dpr, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillText(label, x(idx) + 5 * dpr, y(curve[idx]) + (neg ? 14 : -6) * dpr);
-    }
-  }, [curve, sdptg, height]);
-
-  return <canvas ref={ref} className="wave-canvas" style={{ height }} />;
-}
 
 // ---------------------------------------------------------------------------
 // Key/value grid for measured values.

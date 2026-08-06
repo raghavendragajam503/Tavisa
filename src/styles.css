@@ -135,6 +135,10 @@ th,td{text-align:left;padding:8px 9px;border-bottom:1px solid var(--line-soft);w
 th{font-family:var(--mono);font-size:10px;letter-spacing:1px;text-transform:uppercase;
   color:var(--muted-dim);font-weight:500;}
 tr.sel{background:rgba(110,231,183,.06);}
+/* Rows open their recording on click, so they need to look interactive. */
+tr.clickable{cursor:pointer;}
+tr.clickable:hover{background:rgba(110,231,183,.04);}
+tr.clickable.sel:hover{background:rgba(110,231,183,.09);}
 td.bad{color:var(--red);}
 a{color:var(--mint);}
 

@@ -36,7 +36,9 @@ export const api = {
     req('GET', '/api/patients' + (search ? `?search=${encodeURIComponent(search)}` : '')),
   getPatient: (id) => req('GET', `/api/patients/${id}`),
   savePatient: (patient) => req('POST', '/api/patients', patient),
+  renamePatient: (id, name) => req('PATCH', `/api/patients/${id}`, { name }),
   deletePatient: (id) => req('DELETE', `/api/patients/${id}`),
+  deletePatientSessions: (id) => req('DELETE', `/api/patients/${id}/sessions`),
 
   listSessions: (params = {}) => {
     const q = new URLSearchParams();

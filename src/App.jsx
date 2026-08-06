@@ -3,44 +3,42 @@ import { TavisaDevice, isSupported } from './lib/ble';
 import { analyseRecording, stripGapMarkers, DEVICE_SAMPLE_RATE_HZ } from './lib/dsp';
 import { legacyDoshaFull, legacyDoshaProfile } from './lib/dsp-legacy';
 import { api } from './lib/api';
-import { Stepper, DoshaBars, WaveformCanvas, WaveformDetail, SdptgCanvas, KvGrid, LogPanel } from './components/Common';
+import { Stepper, DoshaBars, WaveformCanvas, WaveformDetail, KvGrid, LogPanel } from './components/Common';
 import History from './components/History';
 
 const SCAN_SECONDS = 300;
 
-// The three algorithms, so the same recording can be run through all of them.
-// "sdptg" is the one to rely on; the two legacy entries exist for comparison
-// and are honest about where their numbers come from.
+// The dosha methods. SDPTG has been removed, so both remaining entries are the
+// legacy anchor-table approach and both are explicit about how much of their
+// output comes from the typed profile rather than the pulse.
+// The object KEYS are stored in the database on every session, so they must not
+// change. Only the labels are renamed — "with vitals" / "no vitals" said nothing
+// about which vitals or why it mattered, so each label now names the inputs that
+// actually differ between the two.
 export const ALGORITHMS = {
-  sdptg: {
-    label: 'SDPTG (new)',
-    blurb: 'Waveform only — no demographics, no lookup tables. Cycles aligned on max dV/dt, '
-         + 'ensemble-median pulse, then second-derivative ratios |b/a| → Vata, c/a → Pitta, e/a → Kapha. '
-         + 'Refuses to output a value if it cannot measure.',
-    demographicShare: 0,
-  },
   'legacy-full': {
-    label: 'Legacy — with vitals',
-    blurb: 'age, gender, weight, height, HR, SpO₂ + FFT absolute frequency bands. Hand-authored anchor '
-         + 'tables interpolated per field (age 18, gender 5, HR 17, weight 10, height 5, SpO₂ 15→30 if <92, '
-         + 'waveform 30). Demographics carry 38% of the result.',
+    label: 'Using heart rate & SpO₂',
+    blurb: 'Profile, heart rate, SpO₂ and the pulse. Hand-authored anchor tables interpolated per field '
+         + '(age 18, gender 5, HR 17, weight 10, height 5, SpO₂ 15→30 if <92, waveform 30). '
+         + 'Typed profile carries 38%, heart rate and SpO₂ 32%, the pulse shape 30%.',
     demographicShare: 38,
   },
   'legacy-profile': {
-    label: 'Legacy — no vitals',
-    blurb: 'Same anchor tables with HR and SpO₂ removed, their weight redistributed '
-         + '(age 25, gender 10, weight 20, height 15, waveform 30). Demographics carry 70% of the result.',
+    label: 'Profile only, no heart rate or SpO₂',
+    blurb: 'The same anchor tables with heart rate and SpO₂ removed and their 32% redistributed to the typed '
+         + 'fields (age 25, gender 10, weight 20, height 15, waveform 30). The pulse still contributes only '
+         + '30%, so dropping the vitals makes the result MORE dependent on the profile, not less: 70%.',
     demographicShare: 70,
   },
 };
 const fx = (v, d = 1, unit = '') => (Number.isFinite(v) ? v.toFixed(d) + unit : '—');
 
 export default function App() {
-  const [view, setView] = useState('scan');          // scan | history
-  // Pinned to legacy-profile for now. The picker below is commented out, so this
-  // is the single algorithm the headline panel reports; the table lower down
-  // still runs all three on the same recording.
-  const [algo, setAlgo] = useState('legacy-profile');
+  const [view, setView] = useState('history');       // history is the landing view; "New scan" switches to scan
+  // Pinned to legacy-full. The picker below is commented out, so this is the
+  // single method the headline panel reports; the table lower down still runs
+  // both on the same recording.
+  const [algo, setAlgo] = useState('legacy-full');
   const [step, setStep] = useState(1);
   const [log, setLog] = useState([]);
   const [status, setStatus] = useState('idle');      // idle | connected | error
@@ -250,10 +248,12 @@ export default function App() {
     } else if (result.hrv?.reason) {
       addLog('HRV not measurable — ' + result.hrv.reason, 'warn');
     }
-    if (result.vascular) {
-      addLog(`Vascular — V ${result.vascular.vata} P ${result.vascular.pitta} K ${result.vascular.kapha} (conf ${result.vascular.confidence}).`, 'ok');
-    } else if (result.unavailableReason) {
-      addLog('Vascular analysis not measurable — ' + result.unavailableReason, 'warn');
+    if (result.unavailableReason) {
+      addLog('Waveform analysis limited — ' + result.unavailableReason, 'warn');
+    }
+    const head = result.legacy?.[algo];
+    if (head) {
+      addLog(`Dosha (${ALGORITHMS[algo].label}) — V ${head.vata} P ${head.pitta} K ${head.kapha} (conf ${head.confidence}).`, 'ok');
     }
 
     setStep(5);
@@ -268,7 +268,10 @@ export default function App() {
     if (!savedPatient) { setSaveState({ ok: false, msg: 'No patient record — nothing saved.' }); return; }
     setSaveState({ pending: true });
     try {
-      const v = result.vascular;
+      // computed.* records the SELECTED method's dosha, which is now always one
+      // of the legacy pair. The sdptg sub-document is no longer written; old
+      // sessions keep theirs, since the schema still accepts it.
+      const v = result.legacy?.[algo] || null;
       const saved = await api.saveSession({
         patient: savedPatient._id,
         durationMs,
@@ -285,17 +288,11 @@ export default function App() {
           pitta: v?.pitta ?? null,
           kapha: v?.kapha ?? null,
           confidence: v?.confidence ?? null,
-          sdptg: v ? {
-            b_a: v.sdptg.b_a, c_a: v.sdptg.c_a, d_a: v.sdptg.d_a, e_a: v.sdptg.e_a,
-            agingIndex: v.sdptg.aging_index, crestTimeMs: v.morphology.crest_time_ms,
-            cyclesUsed: v.quality.cycles_used, alignmentQuality: v.quality.alignment_quality,
-          } : {},
           unavailableReason: result.unavailableReason || result.hrv?.reason || null,
         },
         device: deviceVals,
         algorithm: algo,
         allAlgorithms: {
-          sdptg: v ? { vata: v.vata, pitta: v.pitta, kapha: v.kapha, confidence: v.confidence } : null,
           'legacy-full': result.legacy?.['legacy-full']
             ? { vata: result.legacy['legacy-full'].vata, pitta: result.legacy['legacy-full'].pitta,
                 kapha: result.legacy['legacy-full'].kapha, confidence: result.legacy['legacy-full'].confidence }
@@ -370,9 +367,6 @@ export default function App() {
   // Resolve the selected algorithm to a single {vata,pitta,kapha,confidence}.
   const selected = useMemo(() => {
     if (!analysis) return null;
-    if (algo === 'sdptg') return analysis.vascular
-      ? { ...analysis.vascular, algorithm: 'sdptg' }
-      : { unavailable: true, reason: analysis.unavailableReason };
     return analysis.legacy?.[algo] || null;
   }, [analysis, algo]);
 
@@ -387,14 +381,14 @@ export default function App() {
         <div>
           <div className="mark">TAVISA <span>Console</span></div>
           <div className="tag">
-            // REACT + NODE + MONGODB
             {apiOk === false && <span className="pill err">API offline</span>}
             {apiOk === true && <span className="pill ok">API online</span>}
           </div>
         </div>
         <div className="header-right">
-          <button className={view === 'scan' ? 'primary' : ''} onClick={() => setView('scan')}>New scan</button>
+          {/* History first — it is the landing view. */}
           <button className={view === 'history' ? 'primary' : ''} onClick={() => setView('history')}>History</button>
+          <button className={view === 'scan' ? 'primary' : ''} onClick={() => setView('scan')}>New scan</button>
           {status === 'connected'
             ? <button onClick={disconnect}>Disconnect</button>
             : <span className={'pill ' + (status === 'error' ? 'err' : '')}>
@@ -671,7 +665,7 @@ export default function App() {
 
                 {analysis && (
                   <div className="algo-compare">
-                    <div className="sec">All three algorithms on this same recording</div>
+                    <div className="sec">Both methods on this same recording</div>
                     <div className="table-wrap">
                       <table>
                         <thead>
@@ -680,9 +674,7 @@ export default function App() {
                         </thead>
                         <tbody>
                           {Object.entries(ALGORITHMS).map(([k, a]) => {
-                            const r = k === 'sdptg'
-                              ? (analysis.vascular || null)
-                              : analysis.legacy?.[k];
+                            const r = analysis.legacy?.[k];
                             return (
                               <tr key={k} className={k === algo ? 'sel' : ''}>
                                 <td>{a.label}</td>
@@ -704,9 +696,8 @@ export default function App() {
                       </table>
                     </div>
                     <p className="hint">
-                      Same waveform, same profile, three methods. The rightmost column is how much of each
-                      result comes from the typed profile rather than the pulse — which is the honest reason
-                      to prefer SDPTG.
+                      Same waveform, same profile, both methods. The rightmost column is how much of each
+                      result comes from the typed profile rather than the pulse.
                     </p>
                   </div>
                 )}
@@ -718,36 +709,17 @@ export default function App() {
                 )}
               </section>
 
-              {analysis?.vascular && (
+              {analysis && (
                 <section className="panel">
-                  <h2>Measured pulse-wave indices</h2>
-                  <p className="hint">
-                    The raw measurements the result is built from — second-derivative (SDPTG) wave ratios of the
-                    ensemble-averaged pulse. No hardcoded or demographic values. If alignment quality is low or
-                    few cycles were averaged, treat everything above as unreliable however precise it looks.
-                  </p>
+                  <h2>Measured signal quality</h2>
                   <KvGrid rows={{
                     'sample rate (Hz)': analysis.sampleRateHz,
                     'samples': analysis.sampleCount,
                     'beats detected': analysis.beats.length,
-                    'cycles averaged': analysis.vascular.quality.cycles_used,
-                    'alignment quality': analysis.vascular.quality.alignment_quality,
-                    'cycle length (ms)': analysis.vascular.morphology.cycle_ms,
-                    'crest time (ms)': analysis.vascular.morphology.crest_time_ms,
-                    'b/a (deceleration)': analysis.vascular.sdptg.b_a,
-                    'c/a (tidal wave)': analysis.vascular.sdptg.c_a,
-                    'd/a (dicrotic notch)': analysis.vascular.sdptg.d_a,
-                    'e/a (rebound)': analysis.vascular.sdptg.e_a,
-                    'aging index': analysis.vascular.sdptg.aging_index,
+                    'RR intervals used': analysis.hrv?.rrCount ?? '—',
+                    'RR rejected as artifact': analysis.hrv?.rrRejected ?? '—',
                     'gap markers removed': gapCount,
                   }} />
-                  <div className="sec">SDPTG — second derivative</div>
-                  <SdptgCanvas curve={analysis.vascular.sdptgCurve} sdptg={analysis.vascular.sdptg} />
-                  <p className="hint">
-                    Confirm by eye that <b>a</b> sits on the upstroke, <b>b</b> at the systolic peak, <b>c</b> on
-                    the tidal shoulder, <b>d</b> at the dicrotic notch and <b>e</b> on the rebound. If they do
-                    not, the ratios above are not trustworthy.
-                  </p>
                 </section>
               )}
 
