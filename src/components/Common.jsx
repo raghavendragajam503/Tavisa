@@ -202,7 +202,7 @@ function pulseHalfAmplitude(series, rate) {
   return (median / 2) || 1;
 }
 
-export function WaveformDetail({ data, sampleRateHz = 50, beats, height = 300 }) {
+export function WaveformDetail({ data, sampleRateHz = 100, beats, height = 300 }) {
   const [winSec, setWinSec] = useState(25);
   const [startSec, setStartSec] = useState(0);
   const [showBeats, setShowBeats] = useState(true);
