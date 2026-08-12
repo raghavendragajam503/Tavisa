@@ -14,7 +14,7 @@
 // The firmware's PPG sampling rate. A complete 300s scan is 15000 samples, so a
 // recording's true span is samples/50 — which is how duration must be derived
 // rather than assumed, or a truncated transfer reports a fictional low rate.
-export const DEVICE_SAMPLE_RATE_HZ = 50;
+export const DEVICE_SAMPLE_RATE_HZ = 100;
 
 function mean(a) { return a.length ? a.reduce((x, y) => x + y, 0) / a.length : NaN; }
 function std(a) {
