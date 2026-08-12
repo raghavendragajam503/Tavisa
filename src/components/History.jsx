@@ -83,7 +83,8 @@ export default function History({ onLog }) {
         legacy = {
           'legacy-full': legacyDoshaFull({
             ...args,
-            hr: reanalysed.hrv?.hr ?? full.device?.hrBpm ?? null,
+            // As stored from the device, not re-derived from the beat series.
+            hr: full.device?.hrBpm ?? null,
             spo2: full.device?.spo2 ?? null,
           }),
           'legacy-profile': legacyDoshaProfile(args),
@@ -193,7 +194,7 @@ export default function History({ onLog }) {
                   <thead>
                     <tr>
                       <th>Recorded</th><th>Fs (Hz)</th><th>Samples</th>
-                      <th>HR</th><th>RMSSD</th><th>SDNN</th><th>LF/HF</th>
+                      <th>HR</th><th>SpO₂</th><th>RMSSD</th><th>SDNN</th><th>LF/HF</th>
                       <th>V / P / K</th><th>Conf</th><th>Algorithm</th><th />
                     </tr>
                   </thead>
@@ -219,7 +220,12 @@ export default function History({ onLog }) {
                           <td className="dim">{when(s.recordedAt)}</td>
                           <td className={s.sampleRateHz < 20 ? 'bad' : ''}>{s.sampleRateHz}</td>
                           <td>{s.waveformSampleCount}</td>
-                          <td>{fx(c.hrBpm)}</td>
+                          {/* HR and SpO2 come from s.device, which is what the
+                              firmware sent. computed.hrBpm on older rows was
+                              re-derived from the waveform, so reading device
+                              keeps the column consistent across all sessions. */}
+                          <td>{fx(s.device?.hrBpm)}</td>
+                          <td>{fx(s.device?.spo2)}</td>
                           <td>{fx(c.rmssdMs)}</td>
                           <td>{fx(c.sdnnMs)}</td>
                           <td>{fx(c.lfhf, 2)}</td>
@@ -337,7 +343,7 @@ export default function History({ onLog }) {
                   retroactively to old recordings. HR, RMSSD, SDNN and LF/HF come from the beat series and are
                   the same whichever dosha method is selected.
                 </div>
-                <Row k="Heart rate" v={fx(selSession.reanalysed?.hrv?.hr, 1, ' bpm')} />
+                <Row k="Heart rate" v={fx(selSession.device?.hrBpm, 1, ' bpm (device)')} />
                 <Row k="SpO₂" v={fx(selSession.device?.spo2, 1, ' % (device)')} />
                 <Row k="RMSSD" v={fx(selSession.reanalysed?.hrv?.rmssd)} />
                 <Row k="SDNN" v={fx(selSession.reanalysed?.hrv?.sdnn)} />

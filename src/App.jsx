@@ -80,6 +80,35 @@ export default function App() {
   // see the state as it was before the profile was ever filled in.
   const handleRecordingRef = useRef(null);
   const scanningRef = useRef(false);
+
+  // Device vitals are held in a ref as well as in state.
+  //
+  // The bug this fixes: the firmware sends HR/SpO2/dosha in the same instant it
+  // finishes the bulk transfer, so those notifications land WHILE handleRecording
+  // is already running. State updates re-rendered the results page — which is why
+  // SpO2 appeared there — but the payload posted to the API had already been built
+  // from the deviceVals captured in that callback's closure, so the stored session
+  // recorded spo2: null and History had nothing to show.
+  const deviceValsRef = useRef({});
+  const mergeDevice = useCallback((patch) => {
+    // Ref first and synchronously, so a read during an in-flight save cannot see
+    // a value older than the notification that already arrived.
+    deviceValsRef.current = { ...deviceValsRef.current, ...patch };
+    setDeviceVals(deviceValsRef.current);
+  }, []);
+
+  // The device emits its vitals around the same moment as the end of the
+  // transfer, not before it, so give them a moment to land rather than saving a
+  // record with holes in it.
+  const waitForDeviceVitals = useCallback(async (timeoutMs = 3000) => {
+    const started = Date.now();
+    const have = () => Number.isFinite(deviceValsRef.current.hrBpm)
+                    && Number.isFinite(deviceValsRef.current.spo2);
+    while (!have() && Date.now() - started < timeoutMs) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return have();
+  }, []);
   const scanStartRef = useRef(0);
 
   const addLog = useCallback((message, level = 'info') => {
@@ -133,11 +162,11 @@ export default function App() {
     const dev = new TavisaDevice();
 
     dev.on('log', ({ message, level }) => addLog(message, level));
-    dev.on('device-hr', (hr) => setDeviceVals((d) => ({ ...d, hrBpm: hr })));
-    dev.on('device-spo2', (v) => setDeviceVals((d) => ({ ...d, spo2: v })));
-    dev.on('device-bmi', (v) => setDeviceVals((d) => ({ ...d, bmi: v })));
-    dev.on('device-dosha', (v) => setDeviceVals((d) => ({ ...d, ...{ vata: v.vata, pitta: v.pitta, kapha: v.kapha } })));
-    dev.on('device-hrv', (v) => setDeviceVals((d) => ({ ...d, rmssdMs: v.rmssd, sdnnMs: v.sdnn, lfhf: v.lfhf })));
+    dev.on('device-hr', (hr) => mergeDevice({ hrBpm: hr }));
+    dev.on('device-spo2', (v) => mergeDevice({ spo2: v }));
+    dev.on('device-bmi', (v) => mergeDevice({ bmi: v }));
+    dev.on('device-dosha', (v) => mergeDevice({ vata: v.vata, pitta: v.pitta, kapha: v.kapha }));
+    dev.on('device-hrv', (v) => mergeDevice({ rmssdMs: v.rmssd, sdnnMs: v.sdnn, lfhf: v.lfhf }));
 
     dev.on('session-start', () => { setScanning(true); setStep(4); startTimer(); });
     dev.on('session-end', () => { setScanning(false); stopTimer(); });
@@ -222,6 +251,19 @@ export default function App() {
     }
     const result = analyseRecording(cleaned, durationMs);
 
+    // Wait for the vitals BEFORE they are needed. legacy-full weights heart rate
+    // at 17% and SpO2 at 15%, so computing it early substitutes anchor-table
+    // defaults for two measured inputs and quietly costs 15 confidence points.
+    const gotVitals = await waitForDeviceVitals();
+    const dv = deviceValsRef.current;
+    if (!gotVitals) {
+      addLog(
+        `Device HR/SpO₂ did not arrive within 3s (HR ${fx(dv.hrBpm)}, SpO₂ ${fx(dv.spo2)}) — ` +
+        `storing without them, so the dosha result loses those inputs.`,
+        'warn'
+      );
+    }
+
     // Every algorithm is run on the same recording, so switching between them
     // on the results screen never requires a re-scan.
     const profileArgs = {
@@ -232,8 +274,11 @@ export default function App() {
     result.legacy = {
       'legacy-full': legacyDoshaFull({
         ...profileArgs,
-        hr: result.hrv?.hr ?? deviceVals.hrBpm ?? null,
-        spo2: deviceVals.spo2 ?? null,
+        // Heart rate is taken as the device reports it, not re-derived from the
+        // beat series. RMSSD/SDNN/LF-HF still come from the waveform, since the
+        // device does not transmit an interval series to take them from.
+        hr: dv.hrBpm ?? null,
+        spo2: dv.spo2 ?? null,
       }),
       'legacy-profile': legacyDoshaProfile(profileArgs),
     };
@@ -244,7 +289,7 @@ export default function App() {
       'ok'
     );
     if (result.hrv?.rmssd != null) {
-      addLog(`HRV from waveform — HR ${fx(result.hrv.hr)}bpm, RMSSD ${fx(result.hrv.rmssd)}ms, SDNN ${fx(result.hrv.sdnn)}ms.`, 'ok');
+      addLog(`HRV from waveform — RMSSD ${fx(result.hrv.rmssd)}ms, SDNN ${fx(result.hrv.sdnn)}ms. HR ${fx(dv.hrBpm)}bpm, SpO₂ ${fx(dv.spo2)}% from the device.`, 'ok');
     } else if (result.hrv?.reason) {
       addLog('HRV not measurable — ' + result.hrv.reason, 'warn');
     }
@@ -258,7 +303,9 @@ export default function App() {
 
     setStep(5);
     await persist(cleaned, durationMs, result, gaps);
-  }, [addLog, savedPatient, deviceVals, form]); // eslint-disable-line react-hooks/exhaustive-deps
+    // deviceVals is deliberately NOT a dependency — vitals are read through the
+    // ref, so this callback no longer needs rebuilding on every notification.
+  }, [addLog, savedPatient, form, waitForDeviceVitals]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the refs the BLE listeners read pointed at the current closures.
   useEffect(() => { handleRecordingRef.current = handleRecording; }, [handleRecording]);
@@ -278,7 +325,10 @@ export default function App() {
         waveform: wf,
         gapCount: gaps,
         computed: {
-          hrBpm: result.hrv?.hr ?? null,
+          // Read from the ref, not from state: a notification that arrived while
+          // this save was being assembled is already in the ref, but would not be
+          // in the deviceVals this closure captured.
+          hrBpm: deviceValsRef.current.hrBpm ?? null,
           rmssdMs: result.hrv?.rmssd ?? null,
           sdnnMs: result.hrv?.sdnn ?? null,
           lfhf: result.hrv?.lfhf ?? null,
@@ -290,7 +340,7 @@ export default function App() {
           confidence: v?.confidence ?? null,
           unavailableReason: result.unavailableReason || result.hrv?.reason || null,
         },
-        device: deviceVals,
+        device: deviceValsRef.current,
         algorithm: algo,
         allAlgorithms: {
           'legacy-full': result.legacy?.['legacy-full']
@@ -354,6 +404,9 @@ export default function App() {
   };
 
   const startNewScan = () => {
+    // Clear the ref alongside the state, or the next scan inherits the previous
+    // patient's vitals if the device is slow to send its own.
+    deviceValsRef.current = {};
     setAnalysis(null); setWaveform(null); setDeviceVals({});
     setSaveState(null); setGapCount(0); setStalled(null); setBulkProgress(null); setStep(2);
   };
@@ -625,7 +678,7 @@ export default function App() {
                       )}
                     </div>
                     <div className="sec">Vitals</div>
-                    <Row k="Heart rate" v={fx(analysis?.hrv?.hr, 1, ' bpm')} />
+                    <Row k="Heart rate" v={fx(deviceVals.hrBpm, 1, ' bpm (device)')} />
                     <Row k="SpO₂" v={fx(deviceVals.spo2, 1, ' % (device)')} />
                     <Row k="BMI" v={bmi ?? '—'} />
                     <div className="sec">HRV</div>
