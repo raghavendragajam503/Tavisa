@@ -3,7 +3,7 @@ import { TavisaDevice, isSupported } from './lib/ble';
 import { analyseRecording, stripGapMarkers, DEVICE_SAMPLE_RATE_HZ } from './lib/dsp';
 import { legacyDoshaFull, legacyDoshaProfile } from './lib/dsp-legacy';
 import { api } from './lib/api';
-import { Stepper, DoshaBars, WaveformCanvas, WaveformDetail, KvGrid, LogPanel } from './components/Common';
+import { Stepper, DoshaBars, WaveformCanvas, WaveformDetail, HrvReliability, KvGrid, LogPanel } from './components/Common';
 import History from './components/History';
 
 const SCAN_SECONDS = 300;
@@ -685,6 +685,7 @@ export default function App() {
                     <Row k="RMSSD" v={fx(analysis?.hrv?.rmssd)} />
                     <Row k="SDNN" v={fx(analysis?.hrv?.sdnn)} />
                     <Row k="LF/HF" v={fx(analysis?.hrv?.lfhf, 2)} />
+                    <HrvReliability hrv={analysis?.hrv} />
                     <div className="sec">
                       Dosha
                       {selected && !selected.unavailable &&
@@ -769,10 +770,20 @@ export default function App() {
                     'sample rate (Hz)': analysis.sampleRateHz,
                     'samples': analysis.sampleCount,
                     'beats detected': analysis.beats.length,
-                    'RR intervals used': analysis.hrv?.rrCount ?? '—',
-                    'RR rejected as artifact': analysis.hrv?.rrRejected ?? '—',
+                    'intervals total': analysis.hrv?.rrTotal ?? '—',
+                    'outside 30-200bpm': analysis.hrv?.rrOutOfBand ?? '—',
+                    'rejected vs local median': analysis.hrv?.rrRejected ?? '—',
+                    'intervals used': analysis.hrv?.rrCount ?? '—',
+                    'discarded total': analysis.hrv?.rrDiscardedPct != null
+                      ? `${analysis.hrv.rrDiscardedPct}%` : '—',
                     'gap markers removed': gapCount,
                   }} />
+                  <p className="hint">
+                    <b>Discarded total</b> is the figure to compare against the firmware's <code>artefact</code>
+                    percentage — the app's per-stage counts sit on different denominators. A large gap between
+                    the two usually means the two detectors disagreed on how many beats are present, not that
+                    one of them rejected more aggressively.
+                  </p>
                 </section>
               )}
 

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { analyseRecording, DEVICE_SAMPLE_RATE_HZ } from '../lib/dsp';
 import { legacyDoshaFull, legacyDoshaProfile } from '../lib/dsp-legacy';
-import { DoshaBars, WaveformCanvas, WaveformDetail, KvGrid } from './Common';
+import { DoshaBars, WaveformCanvas, WaveformDetail, HrvReliability, KvGrid } from './Common';
 
 const fx = (v, d = 1, u = '') => (Number.isFinite(v) ? v.toFixed(d) + u : '—');
 const when = (d) => (d ? new Date(d).toLocaleString() : '—');
@@ -115,6 +115,40 @@ export default function History({ onLog }) {
     } catch (e) { onLog?.(e.message, 'error'); }
   };
 
+  // Clears this patient's recordings and KEEPS the patient, so the same person
+  // can be re-scanned without re-entering their profile.
+  const clearSessions = async () => {
+    if (!confirm(
+      `Delete all ${sessions.length} recording(s) for patient ${selPatient.patientId}?\n\n`
+      + 'The raw waveforms go with them and cannot be recovered. The patient record itself is kept.'
+    )) return;
+    try {
+      const r = await api.deletePatientSessions(selPatient._id);
+      setSessions([]);
+      setSelSession(null);
+      // sessionCount is shown in the patients table; keep it honest without a refetch.
+      setPatients((ps) => ps.map((p) => (p._id === selPatient._id ? { ...p, sessionCount: 0, lastScan: null } : p)));
+      onLog?.(`Deleted ${r.sessionsDeleted} recording(s) for ${selPatient.patientId}.`, 'warn');
+    } catch (e) { setError(e.message); onLog?.(e.message, 'error'); }
+  };
+
+  // Deletes the patient AND their recordings. Scoped to this one patient — no
+  // other patient's data is touched.
+  const removePatient = async () => {
+    if (!confirm(
+      `Delete patient ${selPatient.patientId}${selPatient.name ? ` (${selPatient.name})` : ''} entirely?\n\n`
+      + `The profile and all ${sessions.length} recording(s) are removed and cannot be recovered. `
+      + 'No other patient is affected.'
+    )) return;
+    try {
+      const r = await api.deletePatient(selPatient._id);
+      const gone = selPatient.patientId;
+      setPatients((ps) => ps.filter((p) => p._id !== selPatient._id));
+      setSelPatient(null); setSessions([]); setSelSession(null);
+      onLog?.(`Deleted patient ${gone} and ${r.sessionsDeleted} recording(s).`, 'warn');
+    } catch (e) { setError(e.message); onLog?.(e.message, 'error'); }
+  };
+
   // The headline dosha figures. Falls back to null so the "not measurable" note
   // shows rather than three dashes with no explanation.
   const headline = selSession?.legacy?.[HEADLINE_KEY] ?? null;
@@ -185,6 +219,16 @@ export default function History({ onLog }) {
             // dropping one would leave a dangling detail field. Both are still
             // stored on the patient and still sent to the device in the profile.
           }} />
+
+          <div className="row-btns" style={{ marginTop: 12 }}>
+            <button className="danger" onClick={clearSessions} disabled={sessions.length === 0}>
+              Delete {sessions.length} recording{sessions.length === 1 ? '' : 's'}
+            </button>
+            <button className="danger" onClick={removePatient}>Delete patient entirely</button>
+            <span className="hint" style={{ margin: 0 }}>
+              The first keeps the patient so they can be re-scanned; the second removes the profile too.
+            </span>
+          </div>
 
           {sessions.length === 0
             ? <p className="hint">No stored recordings for this patient.</p>
@@ -348,6 +392,7 @@ export default function History({ onLog }) {
                 <Row k="RMSSD" v={fx(selSession.reanalysed?.hrv?.rmssd)} />
                 <Row k="SDNN" v={fx(selSession.reanalysed?.hrv?.sdnn)} />
                 <Row k="LF/HF" v={fx(selSession.reanalysed?.hrv?.lfhf, 2)} />
+                <HrvReliability hrv={selSession.reanalysed?.hrv} />
                 <div className="sec">
                   Dosha <span className="dim">— {HEADLINE_LABEL}</span>
                   {headline && <span className="conf">conf. {headline.confidence}</span>}
@@ -439,8 +484,12 @@ export default function History({ onLog }) {
                 'sample rate (Hz)': selSession.reanalysed.sampleRateHz,
                 'samples': selSession.reanalysed.sampleCount,
                 'beats detected': selSession.reanalysed.beats.length,
-                'RR intervals used': selSession.reanalysed.hrv?.rrCount ?? '—',
-                'RR rejected as artifact': selSession.reanalysed.hrv?.rrRejected ?? '—',
+                'intervals total': selSession.reanalysed.hrv?.rrTotal ?? '—',
+                'outside 30-200bpm': selSession.reanalysed.hrv?.rrOutOfBand ?? '—',
+                'rejected vs local median': selSession.reanalysed.hrv?.rrRejected ?? '—',
+                'intervals used': selSession.reanalysed.hrv?.rrCount ?? '—',
+                'discarded total': selSession.reanalysed.hrv?.rrDiscardedPct != null
+                  ? `${selSession.reanalysed.hrv.rrDiscardedPct}%` : '—',
                 'gap markers removed': selSession.gapCount ?? 0,
               }} />
             </section>

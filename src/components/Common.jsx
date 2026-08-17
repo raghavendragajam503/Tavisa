@@ -67,6 +67,31 @@ export function DoshaBars({ vata, pitta, kapha }) {
 }
 
 // ---------------------------------------------------------------------------
+// Reliability banner for an HRV result.
+//
+// The device prints "UNRELIABLE - high artefact" on its own screen when too much
+// of the interval series has been thrown away. The app was showing RMSSD/SDNN
+// from the same recording with no such warning, which is what made the two look
+// like they disagreed about the measurement when they actually disagreed about
+// whether it was usable at all.
+// ---------------------------------------------------------------------------
+export function HrvReliability({ hrv }) {
+  if (!hrv || hrv.reliability == null || hrv.reliability === 'good') return null;
+  const bad = hrv.reliability === 'unreliable';
+  return (
+    <div className={'col-note ' + (bad ? 'err' : '')}>
+      <b>{bad ? 'Unreliable — high artefact.' : 'Marginal quality.'}</b>{' '}
+      {hrv.rrDiscardedPct}% of beat-to-beat intervals were discarded
+      ({hrv.rrOutOfBand} outside 30–200&nbsp;bpm, {hrv.rrRejected} inconsistent with their neighbours),
+      leaving {hrv.rrCount} of {hrv.rrTotal}.
+      {bad
+        ? ' Above about 30% the figures describe which intervals survived more than they describe the pulse. Re-scan with steadier finger contact.'
+        : ' Treat the figures as indicative; HRV is already biased by a few percent of correction.'}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Waveform canvas. Auto-scales to the data; optional beat markers.
 // ---------------------------------------------------------------------------
 export function WaveformCanvas({ data, beats, height = 140, color = '--amber', playhead = null }) {

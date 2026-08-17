@@ -51,6 +51,24 @@ function cv(a) {
 // --------------------------------------------------------------------------
 const RR_MIN_MS = 300;          // 200bpm
 const RR_MAX_MS = 2000;         //  30bpm
+
+// How much of the interval series may be thrown away before the surviving
+// intervals stop describing the recording.
+//
+// Artifact correction above ~5% already biases HRV, and the usual working limit
+// is around 20%; past that the result mostly reflects which intervals were kept.
+// The device applies its own version of this and prints "UNRELIABLE - high
+// artefact" on screen, so the app classifying the same recording silently as
+// fine was the real disagreement — not the numbers themselves.
+const RR_DISCARD_MARGINAL = 15;
+const RR_DISCARD_UNRELIABLE = 30;
+
+function reliabilityOf(discardedPct) {
+  if (discardedPct == null) return null;
+  if (discardedPct > RR_DISCARD_UNRELIABLE) return 'unreliable';
+  if (discardedPct > RR_DISCARD_MARGINAL) return 'marginal';
+  return 'good';
+}
 const RR_LOCAL_TOL = 0.30;      // reject >30% from the local median
 const RR_LOCAL_WIN = 5;         // +/-5 intervals
 
@@ -506,8 +524,27 @@ function computeHrvFromBeats(beats, sampleIntervalMs) {
                    + `the physiological range (<300ms), so the beat series is unreliable — `
                    + `usually missed beats or too low a sample rate` };
   }
-  return { hr, rmssd, sdnn, lfhf, rrCount: accepted.length, beatsFound: beats.length,
-           rrRejected: rejected, keepRate: +keepRate.toFixed(3), reason: null };
+  // Full interval accounting. rrRejected alone counts only the local-median
+  // rejections among intervals that were already inside the 30-200bpm band, so
+  // on its own it understates what was discarded AND sits on a different
+  // denominator from the firmware's own artefact figure, which is a fraction of
+  // every beat it detected. Reporting all three makes the two comparable.
+  const outOfBand = allIntervals.length - rr.length;
+  const discardedPct = allIntervals.length
+    ? +(((outOfBand + rejected) / allIntervals.length) * 100).toFixed(1)
+    : null;
+  return {
+    hr, rmssd, sdnn, lfhf,
+    rrCount: accepted.length,
+    beatsFound: beats.length,
+    rrTotal: allIntervals.length,
+    rrOutOfBand: outOfBand,
+    rrRejected: rejected,
+    rrDiscardedPct: discardedPct,
+    reliability: reliabilityOf(discardedPct),
+    keepRate: +keepRate.toFixed(3),
+    reason: null,
+  };
 }
 
 // ===========================================================================
