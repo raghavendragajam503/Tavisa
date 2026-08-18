@@ -67,6 +67,10 @@ export default function App() {
   const [waveform, setWaveform] = useState(null);
   const [gapCount, setGapCount] = useState(0);
   const [showDetail, setShowDetail] = useState(false);
+  const [scanFailed, setScanFailed] = useState(null);   // { reason } when the device aborts
+  const [deviceReport, setDeviceReport] = useState(null); // the firmware's own DONE tally
+  const [transferLoss, setTransferLoss] = useState(null); // samples the transfer lost vs DONE
+  const [ibiSeries, setIbiSeries] = useState(null);      // the RR interval record, sent before the waveform
   const [saveState, setSaveState] = useState(null);
 
   const devRef = useRef(null);
@@ -109,6 +113,20 @@ export default function App() {
     }
     return have();
   }, []);
+
+  // The firmware's DONE frame arrives after the transfer, so it needs the same
+  // treatment as the vitals: a ref to dodge the stale closure, and a short wait.
+  // It carries fs_stored and dur_s, which are the only way to know how many
+  // samples SHOULD have arrived — without it a short transfer is indistinguishable
+  // from a short recording.
+  const deviceReportRef = useRef(null);
+  const waitForDeviceReport = useCallback(async (timeoutMs = 3000) => {
+    const started = Date.now();
+    while (!deviceReportRef.current && Date.now() - started < timeoutMs) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return deviceReportRef.current;
+  }, []);
   const scanStartRef = useRef(0);
 
   const addLog = useCallback((message, level = 'info') => {
@@ -145,6 +163,38 @@ export default function App() {
 
   useEffect(() => () => clearInterval(timerRef.current), []);
 
+  // Instrument the receive side, because a clean stop mid-transfer with no gaps
+  // and no end marker is what a browser that stopped draining its notification
+  // queue looks like from the device's side. GATT notifications are
+  // unacknowledged at the protocol level, so nothing is retransmitted and neither
+  // end can tell the difference from a link drop without this.
+  //
+  // Chrome throttles background tabs and can freeze a discarded one outright,
+  // which suspends delivery to characteristicvaluechanged without firing
+  // gattserverdisconnected. Logging the transitions makes that visible in the
+  // same log as the chunk counts.
+  useEffect(() => {
+    const onVis = () => {
+      addLog(
+        `Page became ${document.visibilityState}` +
+        (document.visibilityState === 'hidden'
+          ? ' — a hidden tab may stop draining BLE notifications; keep this window in front during a transfer.'
+          : '.'),
+        document.visibilityState === 'hidden' ? 'warn' : 'info'
+      );
+    };
+    const onFreeze = () => addLog('Page FROZEN by the browser — BLE delivery is suspended.', 'error');
+    const onResume = () => addLog('Page resumed after being frozen; anything sent meanwhile is lost.', 'warn');
+    document.addEventListener('visibilitychange', onVis);
+    document.addEventListener('freeze', onFreeze);
+    document.addEventListener('resume', onResume);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      document.removeEventListener('freeze', onFreeze);
+      document.removeEventListener('resume', onResume);
+    };
+  }, [addLog]);
+
   // ---- connect ----------------------------------------------------------
   const connect = async () => {
     if (connectingRef.current) {
@@ -170,15 +220,48 @@ export default function App() {
 
     dev.on('session-start', () => { setScanning(true); setStep(4); startTimer(); });
     dev.on('session-end', () => { setScanning(false); stopTimer(); });
+    // The interval series precedes the waveform and is the measurement of
+    // record; the waveform is for display.
+    dev.on('ibi-series', (s) => {
+      setIbiSeries(s);
+      addLog(`Interval series received: ${s.count} intervals in ${s.packets} packet(s).`, 'ok');
+    });
     dev.on('bulk-start', () => { setBulkProgress({ samples: 0, chunks: 0 }); setStalled(null); });
     dev.on('bulk-progress', (p) => setBulkProgress(p));
-    dev.on('bulk-complete', ({ waveform: raw }) => {
+    dev.on('bulk-complete', ({ waveform: raw, headerFields }) => {
       setBulkProgress(null);
-      handleRecordingRef.current?.(raw);
+      handleRecordingRef.current?.(raw, headerFields);
     });
-    dev.on('bulk-stalled', ({ waveform: raw, chunks }) => {
+    dev.on('bulk-stalled', ({ waveform: raw, chunks, headerFields }) => {
       setBulkProgress(null);
-      setStalled({ waveform: raw, chunks });
+      setStalled({ waveform: raw, chunks, headerFields });
+    });
+
+    // The firmware can abandon a scan outright and send no waveform at all. If
+    // the app keeps waiting for the transfer it waits forever, with the countdown
+    // still running and nothing to show — so treat this as a terminal outcome and
+    // send the operator back to the profile step.
+    dev.on('scan-failed', ({ reason }) => {
+      setScanning(false);
+      stopTimer();
+      setBulkProgress(null);
+      setStalled(null);
+      setScanFailed({ reason });
+      setStep(2);
+    });
+
+    // The firmware's own tally of the scan it just finished. Logged so its beat
+    // count, artefact rate and true sample rate can be compared against ours
+    // rather than inferred from a serial console.
+    dev.on('scan-done', (d) => {
+      const bits = [];
+      if (d.beatsDetected != null) bits.push(`beats ${d.beatsAccepted}/${d.beatsDetected}`);
+      if (d.artefactPct != null) bits.push(`artefact ${d.artefactPct}%`);
+      if (d.fsStoredHz != null) bits.push(`stored ${d.fsStoredHz}Hz`);
+      if (d.durationSec != null) bits.push(`${d.durationSec}s`);
+      if (bits.length) addLog('Device reports: ' + bits.join(', ') + '.', 'ok');
+      deviceReportRef.current = d;
+      setDeviceReport(d);
     });
 
     dev.on('disconnected', () => {
@@ -224,7 +307,7 @@ export default function App() {
   };
 
   // ---- recording analysis + save ---------------------------------------
-  const handleRecording = useCallback(async (raw) => {
+  const handleRecording = useCallback(async (raw, headerFields = null) => {
     // Strip the firmware's INT16_MIN gap sentinels first: they are not samples,
     // and left in place they inflate the signal's standard deviation, which
     // shifts the beat detector's threshold.
@@ -233,19 +316,68 @@ export default function App() {
     if (gaps) addLog(`Removed ${gaps} gap marker(s) — the finger came off mid-session.`, 'warn');
 
     setWaveform(cleaned);
-    // Duration comes from the sample count at the firmware's rate, NOT from a
-    // hardcoded 300s. Asserting 300s for a truncated transfer is what produced
-    // sessions labelled "2201 samples over 300s" -> 7.34Hz -> refused by the
-    // 20Hz gate. The samples that did arrive were captured at 50Hz regardless of
-    // how many of them made it, so this is the honest span; a full scan still
-    // works out to exactly 300s.
-    const durationMs = Math.round((cleaned.length / DEVICE_SAMPLE_RATE_HZ) * 1000);
-    if (cleaned.length < SCAN_SECONDS * DEVICE_SAMPLE_RATE_HZ * 0.95) {
+
+    // The device's own account of the scan, if it has arrived. fs_stored and
+    // dur_s are the only source of truth for how many samples SHOULD be here;
+    // deriving duration purely from the sample count makes a transfer that lost
+    // data indistinguishable from a genuinely shorter recording.
+    const report = await waitForDeviceReport();
+    // Measured stored rate, in preference order: the bulk header's fs_acq/2,
+    // then the DONE frame's fs_stored, then the compiled-in nominal. The nominal
+    // is half a percent out and varies per device, so it is a last resort.
+    const rateHz = headerFields?.storedRateHz || report?.fsStoredHz || DEVICE_SAMPLE_RATE_HZ;
+    const expected = report?.durationSec && report?.fsStoredHz
+      ? Math.round(report.durationSec * report.fsStoredHz)
+      : null;
+
+    // Duration from the sample count at the firmware's REPORTED rate, not an
+    // assumed integer one: 27041 samples at an assumed 100Hz reads as a clean
+    // 270.4s recording, while at the reported 99.56Hz it is 271.6s of a scan the
+    // device says ran for 300s.
+    const durationMs = Math.round((cleaned.length / rateHz) * 1000);
+
+    // Where the samples went missing, which is NOT the same question as how many.
+    //
+    // The device stores into a heap-capped vector and feeds it from a
+    // non-blocking queue, so samples can be lost before they are ever stored. The
+    // transmit loop derives its start index from the chunk index every iteration,
+    // so it cannot skip a chunk — a short arrival with a matching wave_points is
+    // therefore a complete transfer of an incomplete recording, not a lossy link.
+    //
+    //   stored (header wave_points / DONE wave_points) vs received  -> transit
+    //   dur_s x fs_stored              vs stored                    -> acquisition
+    //
+    // QF_WAVE_TRUNCATED distinguishes the heap cap from a silent queue drop.
+    const stored = report?.wavePoints ?? headerFields?.wavePoints ?? null;
+    if (expected && cleaned.length < expected * 0.99) {
+      const missing = expected - cleaned.length;
+      const inTransit = stored != null ? Math.max(0, stored - cleaned.length) : null;
+      const atAcquisition = stored != null ? Math.max(0, expected - stored) : null;
+      const truncated = report?.waveTruncated ?? headerFields?.waveTruncated ?? null;
+      setTransferLoss({
+        expected, received: cleaned.length, missing, stored, inTransit, atAcquisition, truncated,
+        rateHz, missingSec: missing / rateHz, pct: +((100 * missing) / expected).toFixed(1),
+      });
       addLog(
-        `Partial recording: ${cleaned.length} of ~${SCAN_SECONDS * DEVICE_SAMPLE_RATE_HZ} samples ` +
-        `(${(durationMs / 1000).toFixed(0)}s of pulse, not ${SCAN_SECONDS}s). Analysed at its true ` +
-        `${DEVICE_SAMPLE_RATE_HZ}Hz — shorter recordings widen the HRV confidence interval, and LF/HF ` +
-        `needs 60s of beats.`,
+        `Short recording: ${cleaned.length} of ${expected} samples expected from ` +
+        `${report.durationSec}s x ${report.fsStoredHz}Hz` +
+        (stored != null ? `; the device stored ${stored}` : '') +
+        `. ${missing} samples (${(missing / rateHz).toFixed(1)}s, ${((100 * missing) / expected).toFixed(1)}%) ` +
+        `are absent` +
+        (atAcquisition ? `, ${atAcquisition} of them never recorded` : '') +
+        (inTransit ? ` and ${inTransit} lost in transit` : '') +
+        `. ${truncated
+          ? 'QF_WAVE_TRUNCATED is set: the device hit its heap cap.'
+          : 'QF_WAVE_TRUNCATED is clear, so this is not the heap cap — most likely dropped by the '
+            + 'non-blocking sample queue, or the session ended before 300s.'}`,
+        'error'
+      );
+    } else if (!report && cleaned.length < SCAN_SECONDS * rateHz * 0.95) {
+      // No DONE frame to check against, so fall back to the nominal scan length.
+      addLog(
+        `Partial recording: ${cleaned.length} of ~${SCAN_SECONDS * rateHz} samples ` +
+        `(${(durationMs / 1000).toFixed(0)}s of pulse, not ${SCAN_SECONDS}s). Analysed at ` +
+        `${rateHz}Hz — shorter recordings widen the HRV confidence interval, and LF/HF needs 60s of beats.`,
         'warn'
       );
     }
@@ -372,6 +504,10 @@ export default function App() {
       setStatus('error');
       return;
     }
+    // Resending the profile is the first half of recovering from an aborted scan,
+    // so clear the failure notice here rather than leaving it up through the retry.
+    setScanFailed(null);
+    setDeviceReport(null);
     try {
       const patient = await api.savePatient({ ...form, biomarkers: numericBio(bio) });
       setSavedPatient(patient);
@@ -408,7 +544,9 @@ export default function App() {
     // patient's vitals if the device is slow to send its own.
     deviceValsRef.current = {};
     setAnalysis(null); setWaveform(null); setDeviceVals({});
-    setSaveState(null); setGapCount(0); setStalled(null); setBulkProgress(null); setStep(2);
+    setSaveState(null); setGapCount(0); setStalled(null); setBulkProgress(null);
+    setScanFailed(null); setDeviceReport(null); setTransferLoss(null); setIbiSeries(null);
+    deviceReportRef.current = null; setStep(2);
   };
 
   // ---- derived ----------------------------------------------------------
@@ -490,6 +628,20 @@ export default function App() {
           {step === 2 && (
             <section className="panel">
               <h2>Patient profile</h2>
+              {scanFailed && (
+                <div className="alert err">
+                  <strong>The device aborted the scan: {scanFailed.reason}.</strong> No waveform was recorded, so
+                  there is nothing to salvage.
+                  {scanFailed.reason === 'TOO_NOISY' && (
+                    <> The signal was too noisy to measure — usually finger movement, too light a touch, or cold
+                    hands. Have the patient rest their hand flat and hold still before starting again.</>
+                  )}
+                  <div className="hint" style={{ marginTop: 8 }}>
+                    The firmware discarded the profile and biomarkers along with the aborted session, so both must
+                    be sent again: <b>Save &amp; send profile</b> below, then the biomarkers step, then rescan.
+                  </div>
+                </div>
+              )}
               <div className="grid4">
                 <Field label="Patient ID *">
                   <input value={form.patientId} placeholder="e.g. S001"
@@ -602,15 +754,37 @@ export default function App() {
               {stalled && (
                 <div className="alert err">
                   <strong>The device stopped sending mid-transfer.</strong> {stalled.waveform.length} samples
-                  arrived in {stalled.chunks} chunks, then nothing — a 300&nbsp;s recording should be about{' '}
-                  {SCAN_SECONDS * DEVICE_SAMPLE_RATE_HZ} samples, so roughly{' '}
-                  {Math.round((stalled.waveform.length / (SCAN_SECONDS * DEVICE_SAMPLE_RATE_HZ)) * 100)}% came
-                  through. The end marker never arrived. This is device-side: most often low battery, or the
-                  firmware's transmit loop giving up under BLE congestion.
+                  arrived in {stalled.chunks} chunks, then nothing.
+                  {stalled.headerFields?.wavePoints != null ? (
+                    <> The device said it had stored {stalled.headerFields.wavePoints} samples, so{' '}
+                    {Math.round((stalled.waveform.length / stalled.headerFields.wavePoints) * 100)}% came
+                    through and <b>{stalled.headerFields.wavePoints - stalled.waveform.length} recorded samples
+                    were never sent</b>. That is loss on the link or a transmit loop exiting early — not samples
+                    the device failed to record{stalled.headerFields.qflags === 0 && ', and qflags is 0 so it is '
+                    + 'not the heap cap'}.</>
+                  ) : (
+                    <> No bulk header arrived, so there is nothing to reconcile the count against.</>
+                  )}
+                  {stalled.gaps > 0 && (
+                    <> {stalled.gaps} chunk(s) also went missing mid-stream, from a gap in the chunk index.</>
+                  )}
+                  <div className="hint" style={{ marginTop: 8 }}>
+                    The device sends its end marker only after the chunk loop completes, so if it reported DONE
+                    the marker was transmitted and this end did not receive it. Check that this window stayed in
+                    front for the whole transfer — a hidden or frozen tab stops draining BLE notifications, which
+                    looks exactly like this: a clean stop, no scattered gaps, no end marker.
+                  </div>
+                  {ibiSeries && (
+                    <div className="alert" style={{ marginTop: 8 }}>
+                      <strong>The interval series arrived intact — {ibiSeries.count} intervals.</strong> That is
+                      the record RMSSD, SDNN and LF/HF come from, over the full session. The waveform is for
+                      display, so discarding this partial one loses nothing measurable.
+                    </div>
+                  )}
                   <div className="row-btns" style={{ marginTop: 10 }}>
                     <button
                       className="primary"
-                      onClick={() => { const wf = stalled.waveform; setStalled(null); handleRecording(wf); }}
+                      onClick={() => { const w = stalled.waveform, h = stalled.headerFields; setStalled(null); handleRecording(w, h); }}
                     >
                       Analyse the partial recording anyway
                     </button>
@@ -765,25 +939,94 @@ export default function App() {
 
               {analysis && (
                 <section className="panel">
-                  <h2>Measured signal quality</h2>
-                  <KvGrid rows={{
-                    'sample rate (Hz)': analysis.sampleRateHz,
-                    'samples': analysis.sampleCount,
-                    'beats detected': analysis.beats.length,
-                    'intervals total': analysis.hrv?.rrTotal ?? '—',
-                    'outside 30-200bpm': analysis.hrv?.rrOutOfBand ?? '—',
-                    'rejected vs local median': analysis.hrv?.rrRejected ?? '—',
-                    'intervals used': analysis.hrv?.rrCount ?? '—',
-                    'discarded total': analysis.hrv?.rrDiscardedPct != null
-                      ? `${analysis.hrv.rrDiscardedPct}%` : '—',
-                    'gap markers removed': gapCount,
-                  }} />
-                  <p className="hint">
-                    <b>Discarded total</b> is the figure to compare against the firmware's <code>artefact</code>
-                    percentage — the app's per-stage counts sit on different denominators. A large gap between
-                    the two usually means the two detectors disagreed on how many beats are present, not that
-                    one of them rejected more aggressively.
-                  </p>
+                  <h2>{deviceReport ? 'Signal quality — as reported by the device' : 'Measured signal quality'}</h2>
+                  {transferLoss && (
+                    <div className="alert err">
+                      <strong>{transferLoss.pct}% of the recording is missing.</strong>{' '}
+                      A {deviceReport?.durationSec}s scan at {deviceReport?.fsStoredHz}&nbsp;Hz should be{' '}
+                      {transferLoss.expected} samples;{' '}
+                      {transferLoss.stored != null && <>the device stored {transferLoss.stored} and </>}
+                      {transferLoss.received} arrived.
+                      {transferLoss.atAcquisition > 0 && (
+                        <> <b>{transferLoss.atAcquisition} were never recorded</b> — lost at acquisition, before
+                        any transfer.{' '}
+                        {transferLoss.truncated
+                          ? 'QF_WAVE_TRUNCATED is set: the device hit its heap cap for the waveform buffer.'
+                          : 'QF_WAVE_TRUNCATED is clear, so this is not the heap cap — most likely the '
+                            + 'non-blocking sample queue dropping under load, or a session that ended early.'}</>
+                      )}
+                      {transferLoss.inTransit > 0 && (
+                        <> {transferLoss.inTransit} were stored but did not arrive.</>
+                      )}
+                      {' '}Every figure below describes the {(analysis.durationMs / 1000).toFixed(1)}s that is
+                      present, which is why the app's counts read lower than the device's.
+                    </div>
+                  )}
+                  {deviceReport && (
+                    <div className="delta-box" style={{ marginTop: 0, marginBottom: 12 }}>
+                      <div>
+                        <b>Device</b> {deviceReport.beatsAccepted}/{deviceReport.beatsDetected} intervals kept,
+                        artefact {deviceReport.artefactPct}%
+                        {Number.isFinite(deviceVals.rmssdMs) && <> · RMSSD {fx(deviceVals.rmssdMs)}ms</>}
+                        {Number.isFinite(deviceVals.sdnnMs) && <> · SDNN {fx(deviceVals.sdnnMs)}ms</>}
+                        {Number.isFinite(deviceVals.lfhf) && <> · LF/HF {fx(deviceVals.lfhf, 2)}</>}
+                        <br />
+                        <b>App</b> {analysis.hrv?.rrCount}/{analysis.hrv?.rrTotal} intervals kept,
+                        discarded {analysis.hrv?.rrDiscardedPct}%
+                        {Number.isFinite(analysis.hrv?.rmssd) && <> · RMSSD {fx(analysis.hrv.rmssd)}ms</>}
+                        {Number.isFinite(analysis.hrv?.sdnn) && <> · SDNN {fx(analysis.hrv.sdnn)}ms</>}
+                        {Number.isFinite(analysis.hrv?.lfhf) && <> · LF/HF {fx(analysis.hrv.lfhf, 2)}</>}
+                      </div>
+                      <div className="dim">
+                        Two independent interval series with two different accept rules, so these will not match.
+                        The device detects beats on the {deviceReport.fsAcqHz}&nbsp;Hz acquired stream and applies
+                        its own criterion; the app re-derives intervals from the {deviceReport.fsStoredHz}&nbsp;Hz
+                        stored waveform and rejects anything more than 30% from its local median. The device's
+                        interval series is the measurement of record — once its 3-byte record format is known the
+                        app will report from that instead, and there will be one set of numbers rather than two.
+                      </div>
+                    </div>
+                  )}
+                  {/* The device's own tally is the measurement of record, so it is
+                      what this panel reports. The app's re-derived counts remain in
+                      the comparison box above; they are a cross-check, not the
+                      figures to read off. Falls back to the computed values only
+                      when no DONE frame arrived. */}
+                  {deviceReport ? (
+                    <KvGrid rows={{
+                      'sample rate (Hz)': deviceReport.fsStoredHz ?? '—',
+                      'acquisition rate (Hz)': deviceReport.fsAcqHz ?? '—',
+                      'duration (s)': deviceReport.durationSec ?? '—',
+                      'intervals detected': deviceReport.beatsDetected ?? '—',
+                      'intervals accepted': deviceReport.beatsAccepted ?? '—',
+                      'artefact': deviceReport.artefactPct != null ? `${deviceReport.artefactPct}%` : '—',
+                      'qflags': deviceReport.qflags != null
+                        ? `${deviceReport.qflags}${deviceReport.waveTruncated ? ' (WAVE TRUNCATED)' : ''}`
+                        : '—',
+                      'samples received': analysis.sampleCount,
+                      ...(transferLoss ? { 'samples expected': transferLoss.expected } : {}),
+                      'gap markers removed': gapCount,
+                    }} />
+                  ) : (
+                    <>
+                      <KvGrid rows={{
+                        'sample rate (Hz)': analysis.sampleRateHz,
+                        'samples': analysis.sampleCount,
+                        'beats detected': analysis.beats.length,
+                        'intervals total': analysis.hrv?.rrTotal ?? '—',
+                        'outside 30-200bpm': analysis.hrv?.rrOutOfBand ?? '—',
+                        'rejected vs local median': analysis.hrv?.rrRejected ?? '—',
+                        'intervals used': analysis.hrv?.rrCount ?? '—',
+                        'discarded total': analysis.hrv?.rrDiscardedPct != null
+                          ? `${analysis.hrv.rrDiscardedPct}%` : '—',
+                        'gap markers removed': gapCount,
+                      }} />
+                      <p className="hint">
+                        No status frame arrived from the device, so these are the app's own counts re-derived from
+                        the waveform rather than the device's report.
+                      </p>
+                    </>
+                  )}
                 </section>
               )}
 
