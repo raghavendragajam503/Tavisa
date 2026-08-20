@@ -304,10 +304,23 @@ export class TavisaDevice {
   }
 
   /** Biomarkers second. Zeros are valid and mean "not provided". */
-  async sendBiomarkers({ hba1c = 0, totalChol = 0, ldl = 0, hdl = 0, crp = 0 } = {}) {
-    const csv = [hba1c, totalChol, ldl, hdl, crp].map((v) => Number(v) || 0).join(',');
+  async sendBiomarkers({ hba1c, totalChol, ldl, hdl, crp } = {}) {
+    // An omitted lab is sent as an EMPTY field, not as 0.
+    //
+    // Zero is a value: 0 mg/dL LDL or 0% HbA1c are not "unknown", they are
+    // impossible readings, and the device has no way to tell the difference. Five
+    // zeros looked to the firmware like five supplied labs. Blank fields keep
+    // "not measured" distinct from "measured as zero", so nothing entered sends
+    // ",,,," and a partly filled form sends e.g. "5.4,,,,".
+    const field = (v) => {
+      if (v === null || v === undefined || v === '') return '';
+      const n = Number(v);
+      return Number.isFinite(n) ? String(n) : '';
+    };
+    const csv = [hba1c, totalChol, ldl, hdl, crp].map(field).join(',');
     await this._write(csv);
-    this._log('Sent biomarkers: ' + csv, 'ok');
+    const supplied = csv.split(',').filter((s) => s !== '').length;
+    this._log(`Sent biomarkers: "${csv}" (${supplied} of 5 supplied).`, 'ok');
     return csv;
   }
 

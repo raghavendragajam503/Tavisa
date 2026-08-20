@@ -526,11 +526,11 @@ export default function App() {
       return;
     }
     try {
-      // The device wire protocol needs actual numbers regardless of what's
-      // stored, so zeros still go out over the air when skipped.
+      // Skipping sends all five fields empty (",,,,"), not five zeros — the
+      // device must see "not measured", not five impossible readings.
       const devicePayload = skip ? {} : numericBio(bio);
       await devRef.current.sendBiomarkers(devicePayload);
-      if (skip) addLog('Biomarkers skipped — zeros sent so the device can proceed.', 'warn');
+      if (skip) addLog('Biomarkers skipped — all five fields sent empty so the device knows they are unmeasured.', 'warn');
       if (savedPatient && !skip) {
         const p = await api.savePatient({ ...form, biomarkers: biomarkersForSave(bio) });
         setSavedPatient(p);
@@ -1082,19 +1082,27 @@ function Field({ label, children }) {
 function Row({ k, v }) {
   return <div className="stat-row"><span className="k">{k}</span><span className="v">{v}</span></div>;
 }
+// For the device write. A blank field stays blank all the way down to the CSV,
+// so the firmware receives an empty column rather than a fabricated 0 — see
+// sendBiomarkers(). Previously `Number(v) || 0` turned every unfilled lab into a
+// zero reading, which also made 0 indistinguishable from a genuine 0 entry.
 function numericBio(bio) {
+  const val = (v) => {
+    if (v === '' || v == null) return '';
+    const n = Number(v);
+    return Number.isFinite(n) ? n : '';
+  };
   return {
-    hba1c: Number(bio.hba1c) || 0,
-    totalChol: Number(bio.totalChol) || 0,
-    ldl: Number(bio.ldl) || 0,
-    hdl: Number(bio.hdl) || 0,
-    crp: Number(bio.crp) || 0,
+    hba1c: val(bio.hba1c),
+    totalChol: val(bio.totalChol),
+    ldl: val(bio.ldl),
+    hdl: val(bio.hdl),
+    crp: val(bio.crp),
   };
 }
 // For persisting to the database — a blank field means "not entered", not a
 // clinical zero (0 cholesterol, 0 HbA1c, …), so it's stored as null instead of
-// being coerced to 0. Only used for api.savePatient; the device still gets
-// numericBio()'s zeros above, because the firmware protocol requires a number.
+// being coerced to 0.
 function biomarkersForSave(bio) {
   const val = (v) => {
     const n = Number(v);
