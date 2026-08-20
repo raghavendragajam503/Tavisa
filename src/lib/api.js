@@ -37,6 +37,7 @@ export const api = {
   getPatient: (id) => req('GET', `/api/patients/${id}`),
   savePatient: (patient) => req('POST', '/api/patients', patient),
   renamePatient: (id, name) => req('PATCH', `/api/patients/${id}`, { name }),
+  updatePatientId: (id, patientId) => req('PATCH', `/api/patients/${id}`, { patientId }),
   deletePatient: (id) => req('DELETE', `/api/patients/${id}`),
   deletePatientSessions: (id) => req('DELETE', `/api/patients/${id}/sessions`),
 

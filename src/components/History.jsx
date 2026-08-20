@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { analyseRecording, DEVICE_SAMPLE_RATE_HZ } from '../lib/dsp';
 import { legacyDoshaFull, legacyDoshaProfile } from '../lib/dsp-legacy';
@@ -24,6 +24,20 @@ export default function History({ onLog }) {
   const [selSession, setSelSession] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [editingId, setEditingId] = useState(false);
+  const [idDraft, setIdDraft] = useState('');
+
+  // Scrolled into view whenever their section first appears, so opening a
+  // patient/session actually shows it instead of leaving the page wherever it
+  // was and requiring a manual scroll down to notice anything changed.
+  const patientPanelRef = useRef(null);
+  const sessionPanelRef = useRef(null);
+  useEffect(() => {
+    if (selPatient) patientPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [selPatient?._id]);
+  useEffect(() => {
+    if (selSession) sessionPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [selSession?._id]);
 
   const loadPatients = useCallback(async (q = '') => {
     setBusy(true); setError(null);
@@ -37,19 +51,25 @@ export default function History({ onLog }) {
   useEffect(() => { loadPatients(); }, [loadPatients]);
 
   const openPatient = async (p) => {
-    setSelPatient(p); setSelSession(null); setBusy(true); setError(null);
+    setSelPatient(p); setSelSession(null); setBusy(true); setError(null); setEditingId(false);
     try {
       const r = await api.listSessions({ patient: p._id, limit: 100 });
       setSessions(r.items);
       onLog?.(`Loaded ${r.items.length} stored session(s) for ${p.patientId}.`);
-      // Open the most recent recording straight away — the list is newest-first,
-      // so opening a patient lands on their latest results rather than on a table
-      // that needs a second click to say anything.
-      if (r.items.length) await openSession(r.items[0]);
+      // Leave the session table unopened — the user picks which recording to
+      // view rather than one being auto-selected for them.
     } catch (e) {
       setError(e.message); onLog?.(e.message, 'error');
     } finally { setBusy(false); }
   };
+
+  // Deselects the patient entirely, collapsing back to just the patients table.
+  const closePatient = () => {
+    setSelPatient(null); setSessions([]); setSelSession(null); setEditingId(false);
+  };
+
+  // Clears just the opened session, keeping the patient panel and session list.
+  const closeSession = () => setSelSession(null);
 
   // The list endpoint deliberately omits the waveform (30 KB per row), so it is
   // fetched only when a specific session is opened.
@@ -149,6 +169,28 @@ export default function History({ onLog }) {
     } catch (e) { setError(e.message); onLog?.(e.message, 'error'); }
   };
 
+  const startEditId = () => { setIdDraft(selPatient.patientId); setEditingId(true); };
+  const cancelEditId = () => setEditingId(false);
+
+  // Renames the patient's human-facing ID. The backend keeps every stored
+  // session's denormalised patientId in sync, so the history list stays
+  // consistent without a refetch here.
+  const saveEditId = async () => {
+    const next = idDraft.trim();
+    if (!next) { onLog?.('Patient ID cannot be empty.', 'error'); return; }
+    if (next === selPatient.patientId) { setEditingId(false); return; }
+    const prev = selPatient.patientId;
+    try {
+      const updated = await api.updatePatientId(selPatient._id, next);
+      setSelPatient(updated);
+      setPatients((ps) => ps.map((p) => (p._id === updated._id ? { ...p, patientId: updated.patientId } : p)));
+      setEditingId(false);
+      onLog?.(`Patient ID changed from ${prev} to ${updated.patientId}.`);
+    } catch (e) {
+      setError(e.message); onLog?.(e.message, 'error');
+    }
+  };
+
   // The headline dosha figures. Falls back to null so the "not measurable" note
   // shows rather than three dashes with no explanation.
   const headline = selSession?.legacy?.[HEADLINE_KEY] ?? null;
@@ -205,8 +247,32 @@ export default function History({ onLog }) {
 
       {/* ---------- that patient's sessions ---------- */}
       {selPatient && (
-        <section className="panel">
-          <h2>Sessions — {selPatient.patientId}</h2>
+        <section className="panel" ref={patientPanelRef}>
+          <h2>
+            Sessions —{' '}
+            {editingId ? (
+              <span className="row-btns tight" style={{ display: 'inline-flex', verticalAlign: 'middle' }}>
+                <input
+                  className="mono"
+                  value={idDraft}
+                  autoFocus
+                  onChange={(e) => setIdDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') saveEditId();
+                    if (e.key === 'Escape') cancelEditId();
+                  }}
+                  style={{ width: 140 }}
+                />
+                <button className="primary" onClick={saveEditId}>Save</button>
+                <button onClick={cancelEditId}>Cancel</button>
+              </span>
+            ) : (
+              <span className="row-btns tight" style={{ display: 'inline-flex', verticalAlign: 'middle' }}>
+                <span className="mono">{selPatient.patientId}</span>
+                <button onClick={startEditId} title="Change this patient's ID">Edit ID</button>
+              </span>
+            )}
+          </h2>
           <KvGrid rows={{
             'name': selPatient.name || '—',
             'age': selPatient.age,
@@ -225,85 +291,24 @@ export default function History({ onLog }) {
               Delete {sessions.length} recording{sessions.length === 1 ? '' : 's'}
             </button>
             <button className="danger" onClick={removePatient}>Delete patient entirely</button>
+            <button onClick={closePatient}>Close</button>
             <span className="hint" style={{ margin: 0 }}>
               The first keeps the patient so they can be re-scanned; the second removes the profile too.
             </span>
           </div>
-
-          {sessions.length === 0
-            ? <p className="hint">No stored recordings for this patient.</p>
-            : (
-              <div className="table-wrap" style={{ marginTop: 14 }}>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Recorded</th><th>Fs (Hz)</th><th>Samples</th>
-                      <th>HR</th><th>SpO₂</th><th>RMSSD</th><th>SDNN</th><th>LF/HF</th>
-                      <th>V / P / K</th><th>Conf</th><th>Algorithm</th><th />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sessions.map((s) => {
-                      const c = s.computed || {};
-                      // computed.* holds whichever method was SELECTED when the
-                      // scan was taken, so older rows carry SDPTG figures. Every
-                      // session also stores all three under allAlgorithms, so the
-                      // headline method can be shown consistently across rows
-                      // without re-fetching waveforms the list endpoint omits.
-                      const head = s.allAlgorithms?.[HEADLINE_KEY];
-                      const d = head || c;
-                      const ok = Number.isFinite(d.vata);
-                      const fellBack = !head && Number.isFinite(c.vata);
-                      return (
-                        <tr
-                          key={s._id}
-                          className={'clickable' + (selSession?._id === s._id ? ' sel' : '')}
-                          onClick={() => openSession(s)}
-                          title="Show this recording in full"
-                        >
-                          <td className="dim">{when(s.recordedAt)}</td>
-                          <td className={s.sampleRateHz < 20 ? 'bad' : ''}>{s.sampleRateHz}</td>
-                          <td>{s.waveformSampleCount}</td>
-                          {/* HR and SpO2 come from s.device, which is what the
-                              firmware sent. computed.hrBpm on older rows was
-                              re-derived from the waveform, so reading device
-                              keeps the column consistent across all sessions. */}
-                          <td>{fx(s.device?.hrBpm)}</td>
-                          <td>{fx(s.device?.spo2)}</td>
-                          <td>{fx(c.rmssdMs)}</td>
-                          <td>{fx(c.sdnnMs)}</td>
-                          <td>{fx(c.lfhf, 2)}</td>
-                          <td className="mono">
-                            {ok ? `${d.vata} / ${d.pitta} / ${d.kapha}` : <span className="dim">not measurable</span>}
-                          </td>
-                          <td>{d.confidence ?? '—'}</td>
-                          <td className="mono dim" title={fellBack
-                            ? `This session predates the change and stored no ${HEADLINE_KEY} result, so its selected-at-scan-time figures (${s.algorithm || 'sdptg'}) are shown instead.`
-                            : HEADLINE_LABEL}>
-                            {head ? HEADLINE_LABEL : (s.algorithm || 'sdptg') + ' *'}
-                          </td>
-                          {/* The row itself opens the recording, so these stop the
-                              click bubbling — otherwise deleting or downloading
-                              would also re-open the row underneath. */}
-                          <td className="row-btns tight" onClick={(e) => e.stopPropagation()}>
-                            <a className="btn" href={api.waveformCsvUrl(s._id)}>CSV</a>
-                            <button className="danger" onClick={() => removeSession(s._id)}>×</button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
         </section>
       )}
 
-      {/* ---------- one stored session in full ---------- */}
+      {/* ---------- one stored session in full — rendered above the sessions
+          table itself, so opening a recording shows it right away instead of
+          requiring a scroll past every other session first ---------- */}
       {selSession && (
         <>
-          <section className="panel">
-            <h2>Recording — {when(selSession.recordedAt)}</h2>
+          <section className="panel" ref={sessionPanelRef}>
+            <h2 className="row-btns" style={{ justifyContent: 'space-between' }}>
+              <span>Recording — {when(selSession.recordedAt)}</span>
+              <button onClick={closeSession}>Close</button>
+            </h2>
 
             {selSession.durationSuspect && (
               <div className="alert warn">
@@ -495,6 +500,79 @@ export default function History({ onLog }) {
             </section>
           )}
         </>
+      )}
+
+      {/* ---------- that patient's sessions table ---------- */}
+      {selPatient && (
+        <section className="panel">
+          <h2>Recordings</h2>
+          {sessions.length === 0
+            ? <p className="hint">No stored recordings for this patient.</p>
+            : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Recorded</th><th>Fs (Hz)</th><th>Samples</th>
+                      <th>HR</th><th>SpO₂</th><th>RMSSD</th><th>SDNN</th><th>LF/HF</th>
+                      <th>V / P / K</th><th>Conf</th><th>Algorithm</th><th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sessions.map((s) => {
+                      const c = s.computed || {};
+                      // computed.* holds whichever method was SELECTED when the
+                      // scan was taken, so older rows carry SDPTG figures. Every
+                      // session also stores all three under allAlgorithms, so the
+                      // headline method can be shown consistently across rows
+                      // without re-fetching waveforms the list endpoint omits.
+                      const head = s.allAlgorithms?.[HEADLINE_KEY];
+                      const d = head || c;
+                      const ok = Number.isFinite(d.vata);
+                      const fellBack = !head && Number.isFinite(c.vata);
+                      return (
+                        <tr
+                          key={s._id}
+                          className={'clickable' + (selSession?._id === s._id ? ' sel' : '')}
+                          onClick={() => openSession(s)}
+                          title="Show this recording in full"
+                        >
+                          <td className="dim">{when(s.recordedAt)}</td>
+                          <td className={s.sampleRateHz < 20 ? 'bad' : ''}>{s.sampleRateHz}</td>
+                          <td>{s.waveformSampleCount}</td>
+                          {/* HR and SpO2 come from s.device, which is what the
+                              firmware sent. computed.hrBpm on older rows was
+                              re-derived from the waveform, so reading device
+                              keeps the column consistent across all sessions. */}
+                          <td>{fx(s.device?.hrBpm)}</td>
+                          <td>{fx(s.device?.spo2)}</td>
+                          <td>{fx(c.rmssdMs)}</td>
+                          <td>{fx(c.sdnnMs)}</td>
+                          <td>{fx(c.lfhf, 2)}</td>
+                          <td className="mono">
+                            {ok ? `${d.vata} / ${d.pitta} / ${d.kapha}` : <span className="dim">not measurable</span>}
+                          </td>
+                          <td>{d.confidence ?? '—'}</td>
+                          <td className="mono dim" title={fellBack
+                            ? `This session predates the change and stored no ${HEADLINE_KEY} result, so its selected-at-scan-time figures (${s.algorithm || 'sdptg'}) are shown instead.`
+                            : HEADLINE_LABEL}>
+                            {head ? HEADLINE_LABEL : (s.algorithm || 'sdptg') + ' *'}
+                          </td>
+                          {/* The row itself opens the recording, so these stop the
+                              click bubbling — otherwise deleting or downloading
+                              would also re-open the row underneath. */}
+                          <td className="row-btns tight" onClick={(e) => e.stopPropagation()}>
+                            <a className="btn" href={api.waveformCsvUrl(s._id)}>CSV</a>
+                            <button className="danger" onClick={() => removeSession(s._id)}>×</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+        </section>
       )}
 
       {busy && <div className="alert">Loading…</div>}

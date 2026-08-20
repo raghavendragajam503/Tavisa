@@ -509,7 +509,7 @@ export default function App() {
     setScanFailed(null);
     setDeviceReport(null);
     try {
-      const patient = await api.savePatient({ ...form, biomarkers: numericBio(bio) });
+      const patient = await api.savePatient({ ...form, biomarkers: biomarkersForSave(bio) });
       setSavedPatient(patient);
       addLog(`Patient ${patient.patientId} saved (BMI ${patient.bmi}).`, 'ok');
       await devRef.current.sendProfile(form);
@@ -526,11 +526,13 @@ export default function App() {
       return;
     }
     try {
-      const payload = skip ? {} : numericBio(bio);
-      await devRef.current.sendBiomarkers(payload);
+      // The device wire protocol needs actual numbers regardless of what's
+      // stored, so zeros still go out over the air when skipped.
+      const devicePayload = skip ? {} : numericBio(bio);
+      await devRef.current.sendBiomarkers(devicePayload);
       if (skip) addLog('Biomarkers skipped — zeros sent so the device can proceed.', 'warn');
       if (savedPatient && !skip) {
-        const p = await api.savePatient({ ...form, biomarkers: payload });
+        const p = await api.savePatient({ ...form, biomarkers: biomarkersForSave(bio) });
         setSavedPatient(p);
       }
       setStep(4);
@@ -1087,6 +1089,23 @@ function numericBio(bio) {
     ldl: Number(bio.ldl) || 0,
     hdl: Number(bio.hdl) || 0,
     crp: Number(bio.crp) || 0,
+  };
+}
+// For persisting to the database — a blank field means "not entered", not a
+// clinical zero (0 cholesterol, 0 HbA1c, …), so it's stored as null instead of
+// being coerced to 0. Only used for api.savePatient; the device still gets
+// numericBio()'s zeros above, because the firmware protocol requires a number.
+function biomarkersForSave(bio) {
+  const val = (v) => {
+    const n = Number(v);
+    return v === '' || v == null || !Number.isFinite(n) ? null : n;
+  };
+  return {
+    hba1c: val(bio.hba1c),
+    totalChol: val(bio.totalChol),
+    ldl: val(bio.ldl),
+    hdl: val(bio.hdl),
+    crp: val(bio.crp),
   };
 }
 
